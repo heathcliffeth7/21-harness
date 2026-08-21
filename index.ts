@@ -342,6 +342,7 @@ export default function harness21(pi: ExtensionAPI) {
 					})
 					.filter((p) => p && !isHarnessPath(p));
 				if (paths.length > 0) {
+					console.error("[DEBUG stage] paths=", JSON.stringify(paths));
 					await git(ctx.cwd, ["add", "--", ...paths]);
 					const msg = `21(auto): score ${score}${cfg.score.unit ? " " + cfg.score.unit : ""}${params.notes ? " — " + params.notes.replace(/["\\]/g, "") : ""}`;
 					await git(ctx.cwd, ["commit", "-m", msg]);
@@ -397,6 +398,8 @@ export default function harness21(pi: ExtensionAPI) {
 						})
 						.filter((p) => p && !isHarnessPath(p));
 					if (changed.length > 0) {
+						console.error("[DEBUG revert] changed=", JSON.stringify(changed));
+						console.error("[DEBUG revert] RAW dirty=", JSON.stringify(dirty));
 						const out = await git(ctx.cwd, ["checkout", "--", ...changed]);
 						const after = await git(ctx.cwd, ["status", "--porcelain"]);
 						const remainingTracked = after.split("\n").filter((l) => l.trim() && !l.trim().startsWith("??")).length;
