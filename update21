@@ -8,4 +8,6 @@ echo "Installed version:"
 grep '"version"' "$(dirname "$(readlink -f "$0")")/../git/github.com/heathcliffeth7/21-harness/package.json" 2>/dev/null \
   || grep -h '"version"' ~/.pi/agent/git/github.com/heathcliffeth7/21-harness/package.json 2>/dev/null \
   || echo "(version unknown)"
+echo "What's new (latest):"
+head -6 "$(dirname "$(readlink -f "$0")")/CHANGELOG.md" 2>/dev/null || head -6 ~/.pi/agent/git/github.com/heathcliffeth7/21-harness/CHANGELOG.md 2>/dev/null
 echo "Done. Restart any open pi sessions to load the new version."

@@ -44,6 +44,14 @@ interface BestState {
 	hypothesis?: string;
 }
 
+const VERSION = "0.8.0";
+const CHANGELOG_SUMMARY: Record<string, string> = {
+	"0.8.0": "+ update notifications (this card).",
+	"0.7.0": "+ score21: record OFFICIAL scores from competition submissions/validation queues when local measurement is not possible.",
+	"0.6.0": "/21 now asks WHAT you want to optimize first — the agent finds the repo, sets it up and completes configuration autonomously.",
+	"0.5.0": "+ passive capture: manual scoring runs are logged as external observations.",
+};
+const MARKER_FILE = () => join(os.homedir(), ".pi", "agent", ".21-last-version");
 const CONFIG_PATH = () => join(".21", "config.json");
 const LOG_PATH = () => join(".21", "experiments.jsonl");
 const BEST_PATH = () => join(".21", "best.json");
@@ -144,6 +152,19 @@ export default function harness21(pi: ExtensionAPI) {
 		} catch {
 			/* offline or not a git install -> skip */
 		}
+
+		// show a brief summary once after each version bump
+		try {
+			const marker = MARKER_FILE();
+			let last = "";
+			if (existsSync(marker)) last = fs.readFileSync(marker, "utf-8").trim();
+			if (last !== VERSION) {
+				fs.mkdirSync(path.dirname(marker), { recursive: true });
+				fs.writeFileSync(marker, VERSION);
+				const notes = CHANGELOG_SUMMARY[VERSION] ?? "see CHANGELOG.md for details.";
+				ctx.ui.notify(`📦 21-harness updated to v${VERSION}. What's new: ${notes}`, "info");
+			}
+		} catch {}
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
