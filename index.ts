@@ -20,6 +20,7 @@ import { Type } from "typebox";
 import { readFile, writeFile, appendFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import path from "node:path";
 import os from "node:os";
 
 // ---------- Types ----------
@@ -668,10 +669,106 @@ export default function harness21(pi: ExtensionAPI) {
 	});
 
 	// ---- /21 slash command (human entry point) ----
+	const scaffoldConfig = async (cwd: string, cfg: Config) => {
+		await mkdir(join(cwd, ".21"), { recursive: true });
+		await writeFile(join(cwd, CONFIG_PATH()), JSON.stringify(cfg, null, 2));
+	};
+
+	const buildRegexCandidates = (stdout: string): Array<{ label: string; regex: string }> => {
+		const cands: Array<{ label: string; regex: string; seen: Set<string> }> = [];
+		const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		for (const rawLine of stdout.split("\n")) {
+			const line = rawLine.trim();
+			if (!line) continue;
+			const numRe = /-?\d[\d,]*(?:\.\d+)?/g;
+			let m: RegExpExecArray | null;
+			while ((m = numRe.exec(line)) !== null) {
+				if (m[0].length > 12) continue;
+				const prefix = line.slice(0, m.index);
+				const suffix = line.slice(m.index + m[0].length);
+				if (!prefix && !suffix) continue; // bare number -> too ambiguous
+				const regex =
+					(prefix ? esc(prefix) : "^") +
+					"-?[\\d,]+(?:\\.\\d+)?" +
+					(suffix ? esc(suffix) : "$");
+				if (!cands.some((c) => c.regex === regex)) {
+					cands.push({
+						label: `score from "${line.slice(0, 60)}"`,
+						regex,
+						seen: new Set(),
+					});
+				}
+				if (cands.length >= 6) break;
+			}
+			if (cands.length >= 6) break;
+		}
+		return cands.map(({ label, regex }) => ({ label, regex }));
+	};
+
 	pi.registerCommand("21", {
-		description: "Show 21 harness status, or scaffold with: /21 init name=X eval=./bench.sh regex='score: ([0-9.]+)' mode=max",
+		description: "21 harness: status, guided setup (/21 with no config), or manual /21 init ...",
 		handler: async (args, ctx) => {
 			const cfgPath = join(ctx.cwd, CONFIG_PATH());
+
+			// ---------- interactive setup wizard ----------
+			if ((!args || !args.trim()) && !existsSync(cfgPath)) {
+				if (!ctx.hasUI) {
+					ctx.ui.notify(
+						"No 21 project here. In an interactive session run /21 (guided setup), or:\n/21 init name=X eval=./bench.sh regex='...' mode=max",
+						"warning",
+					);
+					return;
+				}
+				ctx.ui.notify("21 setup — a few questions to wire this project.", "info");
+
+				const defaultName = path.basename(ctx.cwd);
+				const name = await ctx.ui.input("Project name:", defaultName);
+				if (!name) return;
+				const evalCmd = await ctx.ui.input(
+					"Command that produces the score (e.g. ./benchmark.sh):",
+					"",
+				);
+				if (!evalCmd) return;
+
+				let sample = "";
+				if (await ctx.ui.confirm("Run it once now?", `Runs '${evalCmd}' to capture sample output for score detection.`)) {
+					const r = await pi.exec("bash", ["-lc", evalCmd], { timeout: 120000 });
+					sample = (r.stdout || "") + (r.stderr || "");
+					if (!sample.trim()) ctx.ui.notify("(no output captured — you can write the regex manually)", "warning");
+				}
+
+				let regex = "";
+				const candidates = sample ? buildRegexCandidates(sample) : [];
+				if (candidates.length > 0) {
+					const choice = await ctx.ui.select(
+						"Which number is the score?",
+						candidates.map((c) => c.label).concat(["None of these — I'll type the regex"]),
+					);
+					if (!choice) return;
+					const picked = candidates[candidates.indexOf(choice)];
+					regex = picked ? picked.regex : (await ctx.ui.input("Score regex (single capture group):", ""));
+				} else {
+					regex = await ctx.ui.input("Score regex with capture group (e.g. score: ([0-9.]+)):", "");
+				}
+				if (!regex) return;
+
+				const mode = await ctx.ui.select("Which direction is better?", ["max (higher is better)", "min (lower is better)"]);
+				if (!mode) return;
+				const unit = await ctx.ui.input("Score unit (optional, e.g. tx/s):", "");
+
+				await scaffoldConfig(ctx.cwd, {
+					name,
+					eval: { command: evalCmd, timeoutSec: 3600 },
+					score: { regex, mode: mode.startsWith("min") ? "min" : "max", unit: unit || undefined },
+					gate: { autoRevert: true, requireHypothesis: true },
+					supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
+				});
+				ctx.ui.notify(
+					`✅ 21 harness configured for '${name}'. Say "optimize" to start the loop, or run21 --task "..." headless.`,
+					"info",
+				);
+				return;
+			}
 
 			if (args.trim().startsWith("init")) {
 				const kv = new Map<string, string>();
@@ -686,18 +783,16 @@ export default function harness21(pi: ExtensionAPI) {
 					ctx.ui.notify(
 						"Usage: /21 init name=myproj eval=./bench.sh regex='score: ([0-9.]+)' mode=max [unit=tx/s]",
 						"warning",
-						);
+					);
 					return;
 				}
-				await mkdir(join(ctx.cwd, ".21"), { recursive: true });
-				const cfg: Config = {
+				await scaffoldConfig(ctx.cwd, {
 					name,
 					eval: { command: evalCmd, timeoutSec: Number(kv.get("timeout") ?? 3600) },
 					score: { regex, mode: mode as "max" | "min", unit: kv.get("unit") },
 					gate: { autoRevert: true, requireHypothesis: true },
 					supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
-				};
-				await writeFile(cfgPath, JSON.stringify(cfg, null, 2));
+				});
 				ctx.ui.notify(`21 harness configured for '${name}'. Start the loop with hypothesis21 -> change -> bench21.`, "info");
 				return;
 			}
@@ -705,7 +800,7 @@ export default function harness21(pi: ExtensionAPI) {
 			// default: status
 			if (!existsSync(cfgPath)) {
 				ctx.ui.notify(
-					"No 21 project here (.21/config.json missing). Scaffold with:\n/21 init name=X eval=./bench.sh regex='...' mode=max",
+					"No 21 project here (.21/config.json missing). Run /21 in an interactive session for guided setup.",
 					"warning",
 				);
 				return;

@@ -28,12 +28,16 @@ pi install npm:pi-subagents
 
 ## Quick start
 
-Inside any project directory, start pi and scaffold the adapter once:
+Inside any project directory, start pi and run:
 
 ```
-> use init21 to configure: name=my-project, evalCommand=./benchmark.sh,
-  scoreRegex='score: ([0-9.]+)', mode=max
+/21
 ```
+
+A guided setup asks a few questions (project name, eval command) and can run
+your eval command once to auto-detect the score regex from its output — no
+manual regex writing needed. Prefer explicit? Use `/21 init name=...
+eval=... regex=... mode=max`, or just tell the agent what to configure.
 
 Then either drive the loop interactively ("run an optimization iteration") or
 go headless:
