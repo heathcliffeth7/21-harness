@@ -27,7 +27,10 @@ sh("git init -q");
 sh(`printf '#!/bin/bash\\nv=$(cat opt.txt 2>/dev/null||echo 50)\\necho "score: $v"\\n' > b.sh`);
 sh("chmod +x b.sh && echo 50 > opt.txt");
 execFileSync("git", [...GIT, "add", "-A"]);
-execFileSync("git", GIT.concat(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i"]));
+// local identity: CI runners have none, and bench21 auto-commit needs one
+execFileSync("git", [...GIT, "config", "user.email", "test@example.com"]);
+execFileSync("git", [...GIT, "config", "user.name", "e2e"]);
+execFileSync("git", [...GIT, "commit", "-m", "i"]);
 
 // --- load extension ---
 const jiti = createJiti(ROOT, { fsCache: false, moduleCache: false });
