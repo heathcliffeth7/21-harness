@@ -334,9 +334,9 @@ export default function harness21(pi: ExtensionAPI) {
 				// working-tree changes EXCEPT harness state (.21/).
 				const paths = dirty
 					.split("\n")
-					.map((l) => l.trim())
-					.filter((l) => l.length > 0)
+					.filter((l) => l.trim().length > 0)
 					.map((l) => {
+						// porcelain v1: 2 status chars + space, then path — slice on RAW line
 						const p = l.slice(3).trim();
 						return p.includes(" -> ") ? p.split(" -> ").pop()!.trim() : p;
 					})
@@ -390,8 +390,7 @@ export default function harness21(pi: ExtensionAPI) {
 					// aborts the whole checkout and nothing gets reverted.
 					const changed = dirty
 						.split("\n")
-						.map((l) => l.trim())
-						.filter((l) => l.length > 0 && !l.startsWith("??"))
+						.filter((l) => l.trim().length > 0 && !l.trim().startsWith("??"))
 						.map((l) => {
 							const p = l.slice(3).trim();
 							return p.includes(" -> ") ? p.split(" -> ").pop()!.trim() : p;

@@ -1,6 +1,6 @@
 {
   "name": "21-harness",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Autonomous evolutionary optimization harness for pi: enforced hypothesis -> edit -> bench loop with commit gates, auto-revert, lineage, self-reflection, parallel population search, and long-running headless execution.",
   "license": "MIT",
   "keywords": ["pi-package", "evolutionary-search", "autoresearch", "optimization", "agent"],
