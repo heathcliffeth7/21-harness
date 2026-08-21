@@ -93,6 +93,12 @@ function betterScore(a: number, b: number | undefined, mode: "max" | "min"): boo
 	return mode === "max" ? a > b : a < b;
 }
 
+// Harness state (.21/) must never be committed or reverted by the gate:
+// otherwise a regression revert would clobber lineage/best/knowledge.
+function isHarnessPath(p: string): boolean {
+	return p === ".21" || p.startsWith(".21/");
+}
+
 // ---------- Extension ----------
 
 export default function harness21(pi: ExtensionAPI) {
@@ -324,15 +330,26 @@ export default function harness21(pi: ExtensionAPI) {
 			let finalHead = gitHead;
 			if (improved) {
 				// Enforce persistence IN CODE: auto-commit the improvement so that a
-				// later regression's revert restores this exact state. The agent
-				// cannot forget or skip this step.
-				await git(ctx.cwd, ["add", "-A"]);
-				const msg = `21(auto): score ${score}${cfg.score.unit ? " " + cfg.score.unit : ""}${params.notes ? " — " + params.notes.replace(/["\\]/g, "") : ""}`;
-				await git(ctx.cwd, ["commit", "-m", msg]);
-				const newHead = await git(ctx.cwd, ["rev-parse", "--short", "HEAD"]);
-				if (newHead && newHead !== gitHead) {
-					finalHead = newHead;
-					commitNote = `\n🔒 Auto-committed as ${newHead}.`;
+				// later regression's revert restores this exact state. Stage all
+				// working-tree changes EXCEPT harness state (.21/).
+				const paths = dirty
+					.split("\n")
+					.map((l) => l.trim())
+					.filter((l) => l.length > 0)
+					.map((l) => {
+						const p = l.slice(3).trim();
+						return p.includes(" -> ") ? p.split(" -> ").pop()!.trim() : p;
+					})
+					.filter((p) => p && !isHarnessPath(p));
+				if (paths.length > 0) {
+					await git(ctx.cwd, ["add", "--", ...paths]);
+					const msg = `21(auto): score ${score}${cfg.score.unit ? " " + cfg.score.unit : ""}${params.notes ? " — " + params.notes.replace(/["\\]/g, "") : ""}`;
+					await git(ctx.cwd, ["commit", "-m", msg]);
+					const newHead = await git(ctx.cwd, ["rev-parse", "--short", "HEAD"]);
+					if (newHead && newHead !== gitHead) {
+						finalHead = newHead;
+						commitNote = `\n🔒 Auto-committed as ${newHead}.`;
+					}
 				}
 			}
 
