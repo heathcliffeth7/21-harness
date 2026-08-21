@@ -98,4 +98,17 @@ if (commitsAfterWin !== sh("git log --oneline").split("\n").length)
 const gateText = (await tools.bench21.execute("t", {}, undefined, undefined, ctx)).content[0].text;
 if (!gateText.includes("REJECTED")) fail(`bench without hypothesis not rejected: ${gateText}`);
 
-console.log("✅ e2e passed: gates, auto-commit, auto-revert, lineage all verified.");
+// --- guarded reflection (HCL-style) ---
+const rRej = (await tools.reflect21.execute("t", { lessons: ["pixie dust made everything faster"] }, undefined, undefined, ctx)).content[0].text;
+if (!rRej.includes("rejected")) fail(`unsupported lesson not rejected: ${rRej}`);
+
+const rOk = (await tools.reflect21.execute("t", { lessons: ["baseline axis worked reliably as a starting point"] }, undefined, undefined, ctx)).content[0].text;
+if (!rOk.includes("L#1")) fail(`supported lesson not committed: ${rOk}`);
+
+const rContra = (await tools.reflect21.execute("t", { lessons: ["baseline axis failed under load"] }, undefined, undefined, ctx)).content[0].text;
+if (!rContra.toLowerCase().includes("retired")) fail(`contradiction did not retire old lesson: ${rContra}`);
+const kRaw = fs.readFileSync(path.join(WORK, ".21/knowledge.md"), "utf8");
+if (!kRaw.includes("[retired:superseded-by-L#2]")) fail("old lesson not marked retired in file");
+if (!kRaw.match(/L#2 \[active\]/)) fail("new lesson not active in file");
+
+console.log("✅ e2e passed: gates, auto-commit, auto-revert, lineage, guarded reflection all verified.");

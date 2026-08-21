@@ -152,7 +152,8 @@ export default function harness21(pi: ExtensionAPI) {
 		if (existsSync(kPath)) {
 			try {
 				const lines = (await readFile(kPath, "utf-8")).split("\n").filter(Boolean);
-				knowledge = `\n[Persistent knowledge — lessons from previous runs]\n${lines.slice(-30).join("\n")}`;
+				const _all = lines; // visible = active lessons only
+				knowledge = `\n[Persistent knowledge — ACTIVE lessons from previous runs]\n${_all.filter((l) => !/^L#\d+\s+\[retired/i.test(l.trim())).slice(-30).join("\n")}`;
 			} catch {}
 		}
 
@@ -503,17 +504,24 @@ export default function harness21(pi: ExtensionAPI) {
 		},
 	});
 
-	// ---- reflect21 ----
+	// ---- reflect21 (guarded knowledge evolution) ----
+	// Two-phase per HCL: propose (agent) -> evaluate (this code) -> commit.
+	// Evidence check: a lesson must reference real strategy tags and its
+	// polarity must not contradict measured win/loss data. Retention check:
+	// an accepted lesson that contradicts an ACTIVE lesson on the same tag
+	// retires the old one (superseded), never silently deletes it.
 	pi.registerTool({
 		name: "reflect21",
 		label: "21 Reflect",
 		description:
 			"Distill evidence-backed lessons from experiment history into .21/knowledge.md " +
-			"(self-improvement loop). Lessons must be supported by measured data; " +
-			"future sessions see this knowledge automatically. Call at run end and every ~10 iterations.",
+			"(guarded self-improvement). Each lesson is validated against measured lineage data: " +
+			"it must reference at least one known strategy tag and its claim must not contradict " +
+			"win/loss stats. Contradicted active lessons are retired, never deleted. " +
+			"Call at run end and every ~10 iterations.",
 		parameters: Type.Object({
 			lessons: Type.Array(Type.String(), {
-				description: "Evidence-backed lesson list, e.g.: 'simd axis worked on small matrices (3/5 wins)', 'parameter tuning exhausted (0/4)'",
+				description: "Evidence-backed lesson list; mention the strategy tag by name, e.g.: 'simd axis worked on small matrices (3/5 wins)', 'parameter tuning exhausted (0/4)'",
 			}),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -527,7 +535,7 @@ export default function harness21(pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: "REJECTED: at least one lesson required (must be evidence-backed, not intuition)." }], details: {} };
 			}
 
-			// support with statistics
+			// measured statistics per strategy tag
 			const entries = await readJsonl(join(ctx.cwd, LOG_PATH()));
 			const tagStats = new Map<string, { tries: number; wins: number }>();
 			let curTag = "?";
@@ -540,20 +548,103 @@ export default function harness21(pi: ExtensionAPI) {
 					tagStats.set(curTag, s);
 				}
 			}
-			const statsLine = [...tagStats.entries()].map(([t, s]) => `${t} ${s.wins}/${s.tries}`).join(", ");
 			const best = await readBest(ctx.cwd);
 
-			const section =
-				`\n## ${new Date().toISOString()}\n` +
-				`- Score table: ${statsLine || "-"}\n` +
-				(best ? `- Best: ${best.score} @ ${best.gitHead}\n` : "") +
-				params.lessons.map((l) => `- Lesson: ${l}\n`).join("");
+			// --- parse existing knowledge ---
+			const kPath = join(ctx.cwd, KNOWLEDGE_PATH());
+			const kLines = existsSync(kPath) ? (await readFile(kPath, "utf-8")).split("\n") : [];
+			interface Lesson { id: number; status: string; text: string }
+			const lessons: Lesson[] = [];
+			for (const l of kLines) {
+				const m = l.match(/^L#(\d+) \[([^\]]+)\] (.*)$/);
+				if (m) lessons.push({ id: Number(m[1]), status: m[2], text: m[3] });
+			}
+			let nextId = lessons.reduce((mx, l) => Math.max(mx, l.id), 0) + 1;
 
-			await appendFile(join(ctx.cwd, KNOWLEDGE_PATH()), section);
-			return {
-				content: [{ type: "text", text: `${params.lessons.length} lesson(s) written to knowledge (${KNOWLEDGE_PATH()}). Future sessions will see them automatically.` }],
-				details: {},
+			const polarityOf = (t: string): "pos" | "neg" | null => {
+				if (/\b(fail|failed|failing|exhaust|did not|didn't|never|worse|regress|hurt|harmful|not work|unproductive)/i.test(t)) return "neg";
+				if (/\b(work|works|worked|working|improv\w*|win|wins|won|gain\w*|faster|better|helpful|effective|succeed\w*)/i.test(t)) return "pos";
+				return null;
 			};
+			const tagsIn = (t: string): string[] =>
+				[...tagStats.keys()].filter((tag) => tag.length > 2 && t.toLowerCase().includes(tag.toLowerCase()));
+
+			// --- evaluate each proposed lesson ---
+			const accepted: Lesson[] = [];
+			const rejected: string[] = [];
+			const retiredIds = new Set<number>();
+			const ts = new Date().toISOString();
+
+			for (const raw of params.lessons) {
+				const refs = tagsIn(raw);
+				if (refs.length === 0) {
+					rejected.push(`no known strategy tag referenced — rejected: "${raw}" (known: ${[...tagStats.keys()].join(", ") || "none"})`);
+					continue;
+				}
+				const pol = polarityOf(raw);
+				let evidenceOk = true;
+				let why = "";
+				if (pol === "pos") {
+					if (!refs.some((r) => (tagStats.get(r)?.wins ?? 0) > 0)) {
+						evidenceOk = false;
+						why = `positive claim but measured wins=0 for ${refs.join(",")}`;
+					}
+				} else if (pol === "neg") {
+					if (!refs.some((r) => (tagStats.get(r)?.tries ?? 0) > 0)) {
+						evidenceOk = false;
+						why = `negative claim but no measurements exist for ${refs.join(",")}`;
+					}
+				}
+				if (!evidenceOk) {
+					rejected.push(`evidence check failed (${why}) — rejected: "${raw}"`);
+					continue;
+				}
+				const lesson: Lesson = {
+					id: nextId++,
+					status: "active",
+					text: `${raw} [refs: ${refs.map((r) => `${r} ${tagStats.get(r)!.wins}/${tagStats.get(r)!.tries}`).join(", ")}]`,
+				};
+				accepted.push(lesson);
+				// retention check: retire active lessons contradicted on the same tag(s)
+				if (pol) {
+					for (const old of lessons) {
+						if (old.status !== "active" || retiredIds.has(old.id)) continue;
+						const oldRefs = tagsIn(old.text);
+						const shared = refs.filter((r) => oldRefs.includes(r));
+						if (shared.length > 0 && polarityOf(old.text) && polarityOf(old.text) !== pol) {
+							old.status = `retired:superseded-by-L#${lesson.id}`;
+							retiredIds.add(old.id);
+						}
+					}
+				}
+			}
+
+			// --- commit: rewrite file with updated statuses, append new lessons ---
+			if (accepted.length > 0 || retiredIds.size > 0) {
+				const updated = kLines.map((l) => {
+					const m = l.match(/^(L#\d+) \[[^\]]+\] (.*)$/);
+					if (!m) return l;
+					const id = Number(m[1].slice(2));
+					const lesson = [...lessons, ...accepted].find((x) => x.id === id);
+					if (!lesson) return l;
+					if (lesson.status.startsWith("retired")) return `L#${lesson.id} [${lesson.status}] ${lesson.text}`;
+					return l;
+				});
+				const newSection =
+					(updated.some((l) => l.startsWith("## ")) ? "" : `\n## ${ts}\n`) +
+					updated.join("\n") +
+					accepted.map((l) => `L#${l.id} [${l.status}] ${ts.slice(0, 10)} ${l.text}`).join("\n") +
+					(kLines.length ? "\n" : "");
+				await writeFile(kPath, newSection.endsWith("\n") ? newSection : newSection + "\n");
+			}
+
+			const report =
+				`GUARDED REFLECTION COMPLETE\n` +
+				`✅ Committed: ${accepted.map((l) => `L#${l.id}`).join(", ") || "none"}\n` +
+				(rejected.length ? `❌ Rejected:\n - ${rejected.join("\n - ")}\n` : "") +
+				(retiredIds.size ? `🗄️ Retired (superseded, kept in file): L#${[...retiredIds].join(", L#")}\n` : "") +
+				`Future sessions will see only ACTIVE lessons.`;
+			return { content: [{ type: "text", text: report }], details: {} };
 		},
 	});
 

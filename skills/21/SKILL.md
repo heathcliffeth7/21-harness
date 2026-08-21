@@ -44,7 +44,10 @@ When micro-tuning is exhausted, move up level by level:
 ## Reporting rhythm
 
 Every 10 iterations: short report + `reflect21` to write evidence-backed lessons
-into knowledge. When starting new runs, lessons from knowledge are shown to you
+into knowledge. Lessons are GUARDED: each one is validated against measured
+lineage data (must name a strategy tag and must not contradict win/loss stats),
+and a new lesson that contradicts an active one retires the old — nothing is
+silently deleted. When starting new runs, ACTIVE lessons are shown to you
 automatically — follow them.
 
 ## Critical rules
