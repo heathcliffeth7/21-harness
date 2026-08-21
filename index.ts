@@ -34,6 +34,7 @@ interface Config {
 		enabled?: boolean;
 		plateauWindow?: number;
 		minImprovementPct?: number;
+		autoReflect?: boolean;
 	};
 }
 
@@ -246,7 +247,7 @@ export default function harness21(pi: ExtensionAPI) {
 				eval: { command: params.evalCommand, timeoutSec: params.timeoutSec ?? 3600 },
 				score: { regex: params.scoreRegex, mode: params.mode, unit: params.unit },
 				gate: { autoRevert: params.autoRevert ?? true, requireHypothesis: true },
-				supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
+				supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1, autoReflect: true },
 			};
 			await writeFile(join(dir, "config.json"), JSON.stringify(cfg, null, 2));
 			return {
@@ -733,6 +734,7 @@ export default function harness21(pi: ExtensionAPI) {
 					accepted.map((l) => `L#${l.id} [${l.status}] ${ts.slice(0, 10)} ${l.text}`).join("\n") +
 					(kLines.length ? "\n" : "");
 				await writeFile(kPath, newSection.endsWith("\n") ? newSection : newSection + "\n");
+			reviewedThisSession = true;
 			}
 
 			const report =
@@ -937,7 +939,7 @@ export default function harness21(pi: ExtensionAPI) {
 			eval: { command: evalCmd, timeoutSec: prev?.eval.timeoutSec ?? 3600 },
 			score: { regex, mode: modeChoice.startsWith("min") ? "min" : "max", unit },
 			gate: prev?.gate ?? { autoRevert: true, requireHypothesis: true },
-			supervisor: prev?.supervisor ?? { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
+			supervisor: prev?.supervisor ?? { enabled: true, plateauWindow: 5, minImprovementPct: 0.1, autoReflect: true },
 		});
 		ctx.ui.notify(`21 harness ${prev ? "updated" : "configured"} for '${name}'.`, "info");
 		sendGuide();
@@ -996,7 +998,7 @@ export default function harness21(pi: ExtensionAPI) {
 					eval: { command: evalCmd, timeoutSec: Number(kv.get("timeout") ?? existing?.eval.timeoutSec ?? 3600) },
 					score: { regex, mode: mode as "max" | "min", unit: kv.get("unit") ?? existing?.score.unit },
 					gate: existing?.gate ?? { autoRevert: true, requireHypothesis: true },
-					supervisor: existing?.supervisor ?? { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
+					supervisor: existing?.supervisor ?? { enabled: true, plateauWindow: 5, minImprovementPct: 0.1, autoReflect: true },
 				});
 				ctx.ui.notify(`21 harness configured for '${name}'.`, "info");
 				sendGuide();
@@ -1030,6 +1032,39 @@ export default function harness21(pi: ExtensionAPI) {
 				ctx.ui.notify("Could not read .21 state.", "error");
 			}
 		},
+	});
+
+	// ---- Auto-reflection (prime-agent AutoRefine pattern) ----
+	// After substantial manual work, delegate a REVIEW to the agent: it decides
+	// whether the trajectory contains durable lessons; reflect21's own guards
+	// (evidence check, retention/supersede) keep quality high. Once per session.
+	let sessionMsgCount = 0;
+	let reviewedThisSession = false;
+	pi.on("agent_end", () => { sessionMsgCount++; });
+	pi.on("agent_settled", async (_event, ctx) => {
+		const cfgPath = join(ctx.cwd, CONFIG_PATH());
+		if (!existsSync(cfgPath)) return;
+		if (sessionMsgCount < 8 || reviewedThisSession) return;
+		let cfg: Config | undefined;
+		try { cfg = JSON.parse(await readFile(cfgPath, "utf-8")); } catch {}
+		if (!cfg) return;
+		reviewedThisSession = true;
+		const autoMode = cfg.supervisor?.autoReflect !== false;
+		if (!autoMode || !ctx.hasUI || !ctx.isIdle?.()) {
+			ctx.ui.notify(
+				"💡 Substantial work without reflection. If you learned anything durable, call reflect21.",
+				"info",
+			);
+			return;
+		}
+		pi.sendUserMessage(
+			"[21 AUTO-REFLECTION REVIEW] You have completed substantial work in this project. " +
+				"Review the trajectory of THIS session only: is there any DURABLE, evidence-backed insight " +
+				"a future session would need (bottleneck causes, pitfalls, what worked and why)?\n" +
+				"- If YES: capture it with reflect21 right now (mention strategy tags, cite measurements).\n" +
+				'- If NO (routine work, nothing generalizable): reply exactly "nothing durable" and do nothing else.\n' +
+				"Do not invent lessons; reflect21 will reject unsupported claims anyway.",
+		);
 	});
 
 	// ---- Passive capture: log manual eval runs done via plain bash ----

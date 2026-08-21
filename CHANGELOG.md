@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.9.0
+- Auto-reflection (prime-agent AutoRefine pattern): after substantial manual work in a 21 project, the agent is automatically asked to review its trajectory and capture durable lessons via reflect21 — once per session, configurable via `supervisor.autoReflect: false`. reflect21's evidence/retention guards keep quality high.
+
 ## v0.8.0
 - Update notifications: you are now told when a newer 21-harness exists (`pi update --extensions` or `update21`).
 
