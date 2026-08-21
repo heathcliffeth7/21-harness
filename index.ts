@@ -524,6 +524,62 @@ export default function harness21(pi: ExtensionAPI) {
 		},
 	});
 
+	// ---- score21 ----
+	pi.registerTool({
+		name: "score21",
+		label: "21 Official Score",
+		description:
+			"Record an OFFICIAL score that was obtained outside this machine (competition submission, " +
+			"validation queue, leaderboard). Use when local measurement is impossible or only estimates are " +
+			"possible locally. Updates best.json only if the official score beats the current best.",
+		parameters: Type.Object({
+			score: Type.Number({ description: "Official score as reported by the competition" }),
+			notes: Type.Optional(Type.String({ description: "Where it came from, e.g. 'PR #7224 validation queue'" })),
+			gitHead: Type.Optional(Type.String({ description: "Local commit hash this result corresponds to" })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			let cfg: Config;
+			try {
+				cfg = await loadConfig(ctx.cwd);
+			} catch (e: any) {
+				return { content: [{ type: "text", text: e.message }], details: {} };
+			}
+			const bestBefore = await readBest(ctx.cwd);
+			const head = params.gitHead ?? (await git(ctx.cwd, ["rev-parse", "--short", "HEAD"]).catch(() => ""));
+
+			await appendFile(
+				join(ctx.cwd, LOG_PATH()),
+				JSON.stringify({
+					ts: new Date().toISOString(),
+					type: "official",
+					score: params.score,
+					bestBefore: bestBefore?.score ?? null,
+					improved: betterScore(params.score, bestBefore?.score, cfg.score.mode),
+					deltaPct:
+						bestBefore?.score && !Number.isNaN(bestBefore.score)
+							? +(((params.score - bestBefore.score) / Math.abs(bestBefore.score)) * 100).toFixed(4)
+							: null,
+					unit: cfg.score.unit ?? null,
+					gitHead: head,
+					notes: params.notes ?? null,
+				}) + "\n",
+			);
+
+			if (!bestBefore || betterScore(params.score, bestBefore.score, cfg.score.mode)) {
+				const best: BestState = { score: params.score, gitHead: head, ts: new Date().toISOString(), hypothesis: params.notes ?? "official result" };
+				await writeFile(join(ctx.cwd, BEST_PATH()), JSON.stringify(best, null, 2));
+				return {
+					content: [{ type: "text", text: `🏆 OFFICIAL BEST: ${params.score}${cfg.score.unit ? " " + cfg.score.unit : ""} @ ${head} recorded. All future gates compare against this.` }],
+					details: {},
+				};
+			}
+			return {
+				content: [{ type: "text", text: `Official score ${params.score} did not beat best ${bestBefore.score}. Recorded in lineage; best unchanged.` }],
+				details: {},
+			};
+		},
+	});
+
 	// ---- reflect21 (guarded knowledge evolution) ----
 	// Two-phase per HCL: propose (agent) -> evaluate (this code) -> commit.
 	// Evidence check: a lesson must reference real strategy tags and its
