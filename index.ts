@@ -18,7 +18,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readFile, writeFile, appendFile, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import fs, { existsSync } from "node:fs";
 import { join } from "node:path";
 import path from "node:path";
 import os from "node:os";
@@ -674,6 +674,57 @@ export default function harness21(pi: ExtensionAPI) {
 		await writeFile(join(cwd, CONFIG_PATH()), JSON.stringify(cfg, null, 2));
 	};
 
+	const buildRegexCandidates = (stdout: string): Array<{ label: string; regex: string }> => {
+		const cands: Array<{ label: string; regex: string }> = [];
+		const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		for (const rawLine of stdout.split("\n")) {
+			const line = rawLine.trim();
+			if (!line) continue;
+			const numRe = /-?\d[\d,]*(?:\.\d+)?/g;
+			let m: RegExpExecArray | null;
+			while ((m = numRe.exec(line)) !== null) {
+				if (m[0].length > 12) continue;
+				const prefix = line.slice(0, m.index);
+				const suffix = line.slice(m.index + m[0].length);
+				if (!prefix && !suffix) continue;
+				const regex =
+					(prefix ? esc(prefix) : "^") +
+					"-?[\\d,]+(?:\\.\\d+)?" +
+					(suffix ? esc(suffix) : "$");
+				if (!cands.some((c) => c.regex === regex)) {
+					cands.push({ label: `score from "${line.slice(0, 60)}"`, regex });
+				}
+				if (cands.length >= 6) break;
+			}
+			if (cands.length >= 6) break;
+		}
+		return cands;
+	};
+
+	const detectEvalCandidates = (cwd: string): string[] => {
+		const out: string[] = [];
+		const has = (p: string) => existsSync(join(cwd, p));
+		for (const f of ["benchmark.sh", "bench.sh", "run-bench.sh", "benchmark.py", "bench.py", "evaluate.py"]) {
+			if (has(f)) out.push("./" + f);
+		}
+		try {
+			const pkg = JSON.parse(fs.readFileSync(join(cwd, "package.json"), "utf-8"));
+			for (const [k, v] of Object.entries(pkg.scripts ?? {})) {
+				if (/bench|eval|score|perf/i.test(k + " " + String(v))) out.push(`npm run ${k}`);
+			}
+		} catch {}
+		if (has("Cargo.toml")) out.push("cargo bench");
+		if (has("Makefile")) {
+			try {
+				const mk = fs.readFileSync(join(cwd, "Makefile"), "utf-8");
+				for (const m of mk.matchAll(/^([a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)?):(?!=)/gm)) {
+					if (/bench|eval|score|perf/i.test(m[1])) out.push(`make ${m[1]}`);
+				}
+			} catch {}
+		}
+		return [...new Set(out)];
+	};
+
 	const sendGuide = () => {
 		pi.sendMessage({
 			customType: "21-guide",
@@ -697,122 +748,141 @@ export default function harness21(pi: ExtensionAPI) {
 		});
 	};
 
-	const buildRegexCandidates = (stdout: string): Array<{ label: string; regex: string }> => {
-		const cands: Array<{ label: string; regex: string; seen: Set<string> }> = [];
-		const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		for (const rawLine of stdout.split("\n")) {
-			const line = rawLine.trim();
-			if (!line) continue;
-			const numRe = /-?\d[\d,]*(?:\.\d+)?/g;
-			let m: RegExpExecArray | null;
-			while ((m = numRe.exec(line)) !== null) {
-				if (m[0].length > 12) continue;
-				const prefix = line.slice(0, m.index);
-				const suffix = line.slice(m.index + m[0].length);
-				if (!prefix && !suffix) continue; // bare number -> too ambiguous
-				const regex =
-					(prefix ? esc(prefix) : "^") +
-					"-?[\\d,]+(?:\\.\\d+)?" +
-					(suffix ? esc(suffix) : "$");
-				if (!cands.some((c) => c.regex === regex)) {
-					cands.push({
-						label: `score from "${line.slice(0, 60)}"`,
-						regex,
-						seen: new Set(),
-					});
-				}
-				if (cands.length >= 6) break;
-			}
-			if (cands.length >= 6) break;
+	// Guided setup / edit. Empty answers fall back to sensible defaults;
+	// if the scoring command cannot be determined, the rest of setup is
+	// delegated to the agent itself.
+	const runWizard = async (ctx: any, prev?: Config) => {
+		ctx.ui.notify(prev ? "21 setup — press Enter to keep current values." : "21 setup — a few questions to wire this project.", "info");
+
+		const defaultName = prev?.name ?? path.basename(ctx.cwd);
+		const name = (await ctx.ui.input("Project name:", defaultName)) || defaultName;
+
+		// scoring command: previous > detected > typed
+		let evalCmd = "";
+		const detected = detectEvalCandidates(ctx.cwd);
+		if (prev?.eval.command) detected.unshift(prev.eval.command);
+		if (detected.length > 0) {
+			const opts = detected.concat(["None of these — I'll type it"]);
+			const choice = await ctx.ui.select("Command that produces the score:", opts);
+			if (choice === undefined || choice === null) return;
+			evalCmd = choice.startsWith("None of these") ? ((await ctx.ui.input("Command:", "")) || "") : choice;
+		} else {
+			evalCmd = (await ctx.ui.input("Command that produces the score (leave empty and the agent figures it out):", "")) || "";
 		}
-		return cands.map(({ label, regex }) => ({ label, regex }));
+
+		// regex: previous > sampled > typed > delegated to agent
+		let regex = "";
+		let sample = "";
+		if (evalCmd) {
+			const wantSample = prev?.score.regex
+				? await ctx.ui.confirm("Re-run the command to re-detect the score pattern?", `Runs '${evalCmd}' once.`)
+				: await ctx.ui.confirm("Run it once now?", `Runs '${evalCmd}' to capture sample output for score detection.`);
+			if (wantSample) {
+				const r = await pi.exec("bash", ["-lc", evalCmd], { timeout: 120000 });
+				sample = (r.stdout || "") + (r.stderr || "");
+				if (!sample.trim()) ctx.ui.notify("(no output captured)", "warning");
+			}
+			const candidates = sample ? buildRegexCandidates(sample) : [];
+			if (prev?.score.regex && !sample) {
+				regex = (await ctx.ui.input(`Score regex (Enter keeps current: ${prev.score.regex}):`, "")) || prev.score.regex;
+			} else if (candidates.length > 0) {
+				const choice = await ctx.ui.select(
+					"Which number is the score?",
+					candidates.map((c) => c.label).concat(["None of these — I'll type the regex"]),
+				);
+				if (choice === undefined || choice === null) return;
+				const idx = candidates.findIndex((c) => c.label === choice);
+				regex = idx >= 0 ? candidates[idx].regex : ((await ctx.ui.input("Score regex (single capture group):", "")) || "");
+			} else {
+				regex = (await ctx.ui.input("Score regex with capture group (empty = let the agent work it out):", "")) || "";
+			}
+		}
+
+		if (!evalCmd || !regex) {
+			// delegate the remainder to the agent
+			pi.sendUserMessage(
+				"21 setup was left unfinished by the user. Your job now: inspect this project yourself, " +
+					"determine (or create) a suitable score-producing command and its score regex, then finish " +
+					"setup by calling init21 with those parameters" +
+					(prev ? `, keeping project name '${prev.name}' unless you find something better` : "") +
+					". Afterwards report what you configured and why, then show the guide.",
+			);
+			ctx.ui.notify("Handed over to the agent — it will finish the setup.", "info");
+			return;
+		}
+
+		const modeChoice = await ctx.ui.select(
+			prev?.score.mode ? `Which direction is better? (current: ${prev.score.mode})` : "Which direction is better?",
+			["max (higher is better)", "min (lower is better)"],
+		);
+		if (!modeChoice) return;
+		const unit = (await ctx.ui.input("Score unit (optional, e.g. tx/s):", prev?.score.unit ?? "")) || prev?.score.unit;
+
+		await scaffoldConfig(ctx.cwd, {
+			name,
+			eval: { command: evalCmd, timeoutSec: prev?.eval.timeoutSec ?? 3600 },
+			score: { regex, mode: modeChoice.startsWith("min") ? "min" : "max", unit },
+			gate: prev?.gate ?? { autoRevert: true, requireHypothesis: true },
+			supervisor: prev?.supervisor ?? { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
+		});
+		ctx.ui.notify(`21 harness ${prev ? "updated" : "configured"} for '${name}'.`, "info");
+		sendGuide();
 	};
 
 	pi.registerCommand("21", {
-		description: "21 harness: status, guided setup (/21 with no config), or manual /21 init ...",
+		description: "21 harness: /21 guided setup or status · /21 edit · /21 init ...",
 		handler: async (args, ctx) => {
 			const cfgPath = join(ctx.cwd, CONFIG_PATH());
+			const sub = args.trim();
 
-			// ---------- interactive setup wizard ----------
-			if ((!args || !args.trim()) && !existsSync(cfgPath)) {
-				if (!ctx.hasUI) {
-					ctx.ui.notify(
-						"No 21 project here. In an interactive session run /21 (guided setup), or:\n/21 init name=X eval=./bench.sh regex='...' mode=max",
-						"warning",
-					);
+			// read existing config once
+			let existing: Config | undefined;
+			if (existsSync(cfgPath)) {
+				try { existing = JSON.parse(await readFile(cfgPath, "utf-8")) as Config; } catch {}
+			}
+
+			if (sub === "edit") {
+				if (!existing) {
+					ctx.ui.notify("Nothing to edit yet — run /21 first.", "warning");
 					return;
 				}
-				ctx.ui.notify("21 setup — a few questions to wire this project.", "info");
-
-				const defaultName = path.basename(ctx.cwd);
-				const name = await ctx.ui.input("Project name:", defaultName);
-				if (!name) return;
-				const evalCmd = await ctx.ui.input(
-					"Command that produces the score (e.g. ./benchmark.sh):",
-					"",
-				);
-				if (!evalCmd) return;
-
-				let sample = "";
-				if (await ctx.ui.confirm("Run it once now?", `Runs '${evalCmd}' to capture sample output for score detection.`)) {
-					const r = await pi.exec("bash", ["-lc", evalCmd], { timeout: 120000 });
-					sample = (r.stdout || "") + (r.stderr || "");
-					if (!sample.trim()) ctx.ui.notify("(no output captured — you can write the regex manually)", "warning");
-				}
-
-				let regex = "";
-				const candidates = sample ? buildRegexCandidates(sample) : [];
-				if (candidates.length > 0) {
-					const choice = await ctx.ui.select(
-						"Which number is the score?",
-						candidates.map((c) => c.label).concat(["None of these — I'll type the regex"]),
-					);
-					if (!choice) return;
-					const picked = candidates[candidates.indexOf(choice)];
-					regex = picked ? picked.regex : (await ctx.ui.input("Score regex (single capture group):", ""));
-				} else {
-					regex = await ctx.ui.input("Score regex with capture group (e.g. score: ([0-9.]+)):", "");
-				}
-				if (!regex) return;
-
-				const mode = await ctx.ui.select("Which direction is better?", ["max (higher is better)", "min (lower is better)"]);
-				if (!mode) return;
-				const unit = await ctx.ui.input("Score unit (optional, e.g. tx/s):", "");
-
-				await scaffoldConfig(ctx.cwd, {
-					name,
-					eval: { command: evalCmd, timeoutSec: 3600 },
-					score: { regex, mode: mode.startsWith("min") ? "min" : "max", unit: unit || undefined },
-					gate: { autoRevert: true, requireHypothesis: true },
-					supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
-				});
-				ctx.ui.notify(`21 harness configured for '${name}'.`, "info");
-				sendGuide();
+				if (!ctx.hasUI) { ctx.ui.notify("/21 edit needs an interactive session.", "warning"); return; }
+				await runWizard(ctx, existing);
 				return;
 			}
 
-			if (args.trim().startsWith("init")) {
-				const kv = new Map<string, string>();
-				for (const m of args.matchAll(/(\w+)=((?:'[^']*')|("[^"]*")|(\S+))/g)) {
-					kv.set(m[1], (m[2] ?? "").replace(/^['"]|['"]$/g, ""));
-				}
-				const name = kv.get("name");
-				const evalCmd = kv.get("eval") ?? kv.get("cmd") ?? kv.get("evalcommand");
-				const regex = kv.get("regex") ?? kv.get("scoreregex");
-				const mode = (kv.get("mode") ?? "max").toLowerCase();
-				if (!name || !evalCmd || !regex || (mode !== "max" && mode !== "min")) {
+			// bare /21 with no config -> guided setup
+			if ((!sub || !sub.startsWith("init")) && !existing) {
+				if (!ctx.hasUI) {
 					ctx.ui.notify(
-						"Usage: /21 init name=myproj eval=./bench.sh regex='score: ([0-9.]+)' mode=max [unit=tx/s]",
+						"No 21 project here. In an interactive session run /21 (guided setup — the agent can finish it for you), or:\n/21 init name=X eval=./bench.sh regex='...' mode=max",
 						"warning",
 					);
 					return;
 				}
+				await runWizard(ctx);
+				return;
+			}
+
+			if (sub.startsWith("init")) {
+				const kv = new Map<string, string>();
+				for (const m of sub.matchAll(/(\w+)=((?:'[^']*')|("[^"]*")|(\S+))/g)) {
+					kv.set(m[1], (m[2] ?? "").replace(/^['"]|['"]$/g, ""));
+				}
+				const name = kv.get("name") ?? existing?.name ?? path.basename(ctx.cwd);
+				const evalCmd = kv.get("eval") ?? kv.get("cmd") ?? kv.get("evalcommand");
+				const regex = kv.get("regex") ?? kv.get("scoreregex");
+				const mode = (kv.get("mode") ?? existing?.score.mode ?? "max").toLowerCase();
+				if (!evalCmd || !regex || (mode !== "max" && mode !== "min")) {
+					ctx.ui.notify("Usage: /21 init eval=./bench.sh regex='score: ([0-9.]+)' mode=max [name=X unit=tx/s]", "warning");
+					return;
+				}
 				await scaffoldConfig(ctx.cwd, {
 					name,
-					eval: { command: evalCmd, timeoutSec: Number(kv.get("timeout") ?? 3600) },
-					score: { regex, mode: mode as "max" | "min", unit: kv.get("unit") },
-					gate: { autoRevert: true, requireHypothesis: true },
-					supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
+					eval: { command: evalCmd, timeoutSec: Number(kv.get("timeout") ?? existing?.eval.timeoutSec ?? 3600) },
+					score: { regex, mode: mode as "max" | "min", unit: kv.get("unit") ?? existing?.score.unit },
+					gate: existing?.gate ?? { autoRevert: true, requireHypothesis: true },
+					supervisor: existing?.supervisor ?? { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
 				});
 				ctx.ui.notify(`21 harness configured for '${name}'.`, "info");
 				sendGuide();
@@ -820,15 +890,12 @@ export default function harness21(pi: ExtensionAPI) {
 			}
 
 			// default: status
-			if (!existsSync(cfgPath)) {
-				ctx.ui.notify(
-					"No 21 project here (.21/config.json missing). Run /21 in an interactive session for guided setup.",
-					"warning",
-				);
+			if (!existing) {
+				ctx.ui.notify("No 21 project here. Run /21 in an interactive session for guided setup.", "warning");
 				return;
 			}
 			try {
-				const cfg = JSON.parse(await readFile(cfgPath, "utf-8")) as Config;
+				const cfg = existing;
 				const entries = await readJsonl(join(ctx.cwd, LOG_PATH()));
 				const benches = entries.filter((e) => e.type === "bench");
 				const best = await readBest(ctx.cwd);
@@ -841,7 +908,8 @@ export default function harness21(pi: ExtensionAPI) {
 				ctx.ui.notify(
 					`21 project: ${cfg.name}\n` +
 						`Best: ${best ? `${best.score}${cfg.score.unit ? " " + cfg.score.unit : ""} @ ${best.gitHead}` : "none yet"}\n` +
-						`Measurements: ${benches.length} (${wins} improved) · since last win: ${sinceLastWin}`,
+						`Measurements: ${benches.length} (${wins} improved) · since last win: ${sinceLastWin}\n` +
+						`Edit settings: /21 edit`,
 					"info",
 				);
 			} catch {
