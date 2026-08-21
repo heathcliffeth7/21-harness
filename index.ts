@@ -379,7 +379,7 @@ export default function harness21(pi: ExtensionAPI) {
 							const p = l.slice(3).trim();
 							return p.includes(" -> ") ? p.split(" -> ").pop()!.trim() : p;
 						})
-						.filter(Boolean);
+						.filter((p) => p && !isHarnessPath(p));
 					if (changed.length > 0) {
 						const out = await git(ctx.cwd, ["checkout", "--", ...changed]);
 						const after = await git(ctx.cwd, ["status", "--porcelain"]);
