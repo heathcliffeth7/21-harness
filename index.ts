@@ -674,6 +674,29 @@ export default function harness21(pi: ExtensionAPI) {
 		await writeFile(join(cwd, CONFIG_PATH()), JSON.stringify(cfg, null, 2));
 	};
 
+	const sendGuide = () => {
+		pi.sendMessage({
+			customType: "21-guide",
+			content: [
+				"✅ 21 harness is ready. Here is how the loop works:",
+				"",
+				"  1. hypothesis21  — log WHAT you will try + a strategy tag",
+				"  2. make ONE focused change",
+				"  3. bench21       — measure. Improvements are kept and",
+				"                      auto-committed; regressions are auto-reverted.",
+				"",
+				"Example of a full iteration:",
+				'  hypothesis21 { hypothesis: "smaller chunks reduce cache pressure", strategyTag: "memory-layout" }',
+				"  ... edit one file ...",
+				"  bench21  →  ✅ IMPROVED: 120 tx/s (+20%) 🔒 Auto-committed",
+				"",
+				'Try it now by saying "optimize" — or go headless with:',
+				'  run21 --task "improve the score" --iterations 20',
+			].join("\n"),
+			display: true,
+		});
+	};
+
 	const buildRegexCandidates = (stdout: string): Array<{ label: string; regex: string }> => {
 		const cands: Array<{ label: string; regex: string; seen: Set<string> }> = [];
 		const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -763,10 +786,8 @@ export default function harness21(pi: ExtensionAPI) {
 					gate: { autoRevert: true, requireHypothesis: true },
 					supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
 				});
-				ctx.ui.notify(
-					`✅ 21 harness configured for '${name}'. Say "optimize" to start the loop, or run21 --task "..." headless.`,
-					"info",
-				);
+				ctx.ui.notify(`21 harness configured for '${name}'.`, "info");
+				sendGuide();
 				return;
 			}
 
@@ -793,7 +814,8 @@ export default function harness21(pi: ExtensionAPI) {
 					gate: { autoRevert: true, requireHypothesis: true },
 					supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
 				});
-				ctx.ui.notify(`21 harness configured for '${name}'. Start the loop with hypothesis21 -> change -> bench21.`, "info");
+				ctx.ui.notify(`21 harness configured for '${name}'.`, "info");
+				sendGuide();
 				return;
 			}
 
