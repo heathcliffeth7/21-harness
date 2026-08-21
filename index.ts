@@ -352,10 +352,27 @@ export default function harness21(pi: ExtensionAPI) {
 			} else {
 				let revertNote = "";
 				if (cfg.gate?.autoRevert !== false && dirty) {
-					const changed = dirty.split("\n").map((l) => l.slice(3).trim()).filter(Boolean);
+					// only tracked changes are revertible; exclude untracked ("??") entries
+					// and handle rename pairs ("old -> new") — otherwise one bad pathspec
+					// aborts the whole checkout and nothing gets reverted.
+					const changed = dirty
+						.split("\n")
+						.map((l) => l.trim())
+						.filter((l) => l.length > 0 && !l.startsWith("??"))
+						.map((l) => {
+							const p = l.slice(3).trim();
+							return p.includes(" -> ") ? p.split(" -> ").pop()!.trim() : p;
+						})
+						.filter(Boolean);
 					if (changed.length > 0) {
-						await git(ctx.cwd, ["checkout", "--", ...changed]);
-						revertNote = `\n↩️ AUTO-REVERT: ${changed.length} file(s) reverted (${changed.slice(0, 8).join(", ")}${changed.length > 8 ? "…" : ""}).`;
+						const out = await git(ctx.cwd, ["checkout", "--", ...changed]);
+						const after = await git(ctx.cwd, ["status", "--porcelain"]);
+						const remainingTracked = after.split("\n").filter((l) => l.trim() && !l.trim().startsWith("??")).length;
+						if (remainingTracked === 0) {
+							revertNote = `\n↩️ AUTO-REVERT: ${changed.length} file(s) restored (${changed.slice(0, 8).join(", ")}${changed.length > 8 ? "…" : ""}).`;
+						} else {
+							revertNote = `\n⚠️ AUTO-REVERT INCOMPLETE: ${remainingTracked} tracked change(s) remain. Inspect with 'git status' before continuing.`;
+						}
 					}
 				}
 				verdictText =
