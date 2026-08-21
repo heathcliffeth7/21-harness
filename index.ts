@@ -320,6 +320,22 @@ export default function harness21(pi: ExtensionAPI) {
 					? ((score - bestBefore.score) / Math.abs(bestBefore.score)) * 100
 					: null;
 
+			let commitNote = "";
+			let finalHead = gitHead;
+			if (improved) {
+				// Enforce persistence IN CODE: auto-commit the improvement so that a
+				// later regression's revert restores this exact state. The agent
+				// cannot forget or skip this step.
+				await git(ctx.cwd, ["add", "-A"]);
+				const msg = `21(auto): score ${score}${cfg.score.unit ? " " + cfg.score.unit : ""}${params.notes ? " — " + params.notes.replace(/["\\]/g, "") : ""}`;
+				await git(ctx.cwd, ["commit", "-m", msg]);
+				const newHead = await git(ctx.cwd, ["rev-parse", "--short", "HEAD"]);
+				if (newHead && newHead !== gitHead) {
+					finalHead = newHead;
+					commitNote = `\n🔒 Auto-committed as ${newHead}.`;
+				}
+			}
+
 			const entry = {
 				ts: new Date().toISOString(),
 				type: "bench",
@@ -328,7 +344,7 @@ export default function harness21(pi: ExtensionAPI) {
 				improved,
 				deltaPct: deltaPct === null ? null : +deltaPct.toFixed(4),
 				unit: cfg.score.unit ?? null,
-				gitHead,
+				gitHead: finalHead,
 				dirtyFiles: dirty ? dirty.split("\n").length : 0,
 				notes: params.notes ?? null,
 			};
@@ -339,7 +355,7 @@ export default function harness21(pi: ExtensionAPI) {
 			if (improved) {
 				const best: BestState = {
 					score,
-					gitHead,
+					gitHead: finalHead,
 					ts: entry.ts,
 					hypothesis: params.notes ?? null,
 				};
@@ -347,8 +363,8 @@ export default function harness21(pi: ExtensionAPI) {
 				verdictText =
 					`✅ IMPROVED: ${score}${cfg.score.unit ? " " + cfg.score.unit : ""}` +
 					(deltaPct !== null ? ` (${deltaPct > 0 ? "+" : ""}${deltaPct.toFixed(2)}%)` : " (first measurement)") +
-					`\nNew best recorded. You may deepen this axis: commit the change (` +
-					`git add -A && git commit -m "21: ${params.notes ?? score}") and take the next step on the same strategy axis.`;
+					commitNote +
+					`\nNew best recorded. You may deepen on this axis with your next hypothesis.`;
 			} else {
 				let revertNote = "";
 				if (cfg.gate?.autoRevert !== false && dirty) {
@@ -379,7 +395,7 @@ export default function harness21(pi: ExtensionAPI) {
 					`❌ REGRESSED: ${score}${cfg.score.unit ? " " + cfg.score.unit : ""} < best ${bestBefore!.score}` +
 					(deltaPct !== null ? ` (${deltaPct.toFixed(2)}%)` : "") +
 					revertNote +
-					`\nThis approach did not work. Do NOT retry the same strategy tag; switch to a different axis.`;
+					`\nThis approach did not work. Do NOT retry the same strategy tag; switch to a different axis. Best state is safe at ${bestBefore!.gitHead}.`;
 			}
 
 			return { content: [{ type: "text", text: verdictText }], details: { score, improved } };
