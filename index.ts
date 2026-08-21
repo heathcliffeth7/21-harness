@@ -15,7 +15,7 @@
  * Model-agnostic: works with whatever model pi is configured with.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readFile, writeFile, appendFile, mkdir } from "node:fs/promises";
 import fs, { existsSync } from "node:fs";
@@ -916,6 +916,48 @@ export default function harness21(pi: ExtensionAPI) {
 				ctx.ui.notify("Could not read .21 state.", "error");
 			}
 		},
+	});
+
+	// ---- Passive capture: log manual eval runs done via plain bash ----
+	let warnedExternalThisSession = false;
+	pi.on("tool_call", async (event, ctx) => {
+		if (!isToolCallEventType("bash", event)) return;
+		const cfgPath = join(ctx.cwd, CONFIG_PATH());
+		if (!existsSync(cfgPath)) return;
+		let cfg: Config;
+		try {
+			cfg = JSON.parse(await readFile(cfgPath, "utf-8"));
+		} catch {
+			return;
+		}
+		const base = cfg.eval.command.replace(/^\.?\//, "").split(" ")[0];
+		if (!base || base.length < 3) return;
+		const cmd = String(event.input?.command ?? "");
+		if (!cmd.includes(base)) return;
+
+		// best-effort observation log (scores unknown -> type "external")
+		try {
+			await appendFile(
+				join(ctx.cwd, LOG_PATH()),
+				JSON.stringify({
+					ts: new Date().toISOString(),
+					type: "external",
+					command: cmd.slice(0, 300),
+					gitHead: "",
+				}) + "\n",
+			);
+		} catch {}
+		if (!warnedExternalThisSession) {
+			warnedExternalThisSession = true;
+			pi.sendMessage({
+				customType: "21-notice",
+				content:
+					"[21] You ran the scoring command directly. This run was recorded as an external observation, " +
+					"but its score was NOT captured or gated. For real measurements use bench21 — then the score " +
+					"is parsed, compared against best, and improvements are committed automatically.",
+				display: true,
+			});
+		}
 	});
 
 	// ---- Supervisor: plateau detection and redirection ----

@@ -14,6 +14,6 @@ jobs:
         with:
           node-version: 20
       - name: Install test deps
-        run: npm install --no-save jiti typebox
+        run: npm install --no-save jiti typebox @earendil-works/pi-coding-agent
       - name: Run e2e
         run: node test/e2e.mjs
