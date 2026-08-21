@@ -506,6 +506,72 @@ export default function harness21(pi: ExtensionAPI) {
 		},
 	});
 
+	// ---- /21 slash command (human entry point) ----
+	pi.registerCommand("21", {
+		description: "Show 21 harness status, or scaffold with: /21 init name=X eval=./bench.sh regex='score: ([0-9.]+)' mode=max",
+		handler: async (args, ctx) => {
+			const cfgPath = join(ctx.cwd, CONFIG_PATH());
+
+			if (args.trim().startsWith("init")) {
+				const kv = new Map<string, string>();
+				for (const m of args.matchAll(/(\w+)=((?:'[^']*')|("[^"]*")|(\S+))/g)) {
+					kv.set(m[1], (m[2] ?? "").replace(/^['"]|['"]$/g, ""));
+				}
+				const name = kv.get("name");
+				const evalCmd = kv.get("eval") ?? kv.get("cmd") ?? kv.get("evalcommand");
+				const regex = kv.get("regex") ?? kv.get("scoreregex");
+				const mode = (kv.get("mode") ?? "max").toLowerCase();
+				if (!name || !evalCmd || !regex || (mode !== "max" && mode !== "min")) {
+					ctx.ui.notify(
+						"Usage: /21 init name=myproj eval=./bench.sh regex='score: ([0-9.]+)' mode=max [unit=tx/s]",
+						"warning",
+						);
+					return;
+				}
+				await mkdir(join(ctx.cwd, ".21"), { recursive: true });
+				const cfg: Config = {
+					name,
+					eval: { command: evalCmd, timeoutSec: Number(kv.get("timeout") ?? 3600) },
+					score: { regex, mode: mode as "max" | "min", unit: kv.get("unit") },
+					gate: { autoRevert: true, requireHypothesis: true },
+					supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1 },
+				};
+				await writeFile(cfgPath, JSON.stringify(cfg, null, 2));
+				ctx.ui.notify(`21 harness configured for '${name}'. Start the loop with hypothesis21 -> change -> bench21.`, "info");
+				return;
+			}
+
+			// default: status
+			if (!existsSync(cfgPath)) {
+				ctx.ui.notify(
+					"No 21 project here (.21/config.json missing). Scaffold with:\n/21 init name=X eval=./bench.sh regex='...' mode=max",
+					"warning",
+				);
+				return;
+			}
+			try {
+				const cfg = JSON.parse(await readFile(cfgPath, "utf-8")) as Config;
+				const entries = await readJsonl(join(ctx.cwd, LOG_PATH()));
+				const benches = entries.filter((e) => e.type === "bench");
+				const best = await readBest(ctx.cwd);
+				let sinceLastWin = 0;
+				for (let i = benches.length - 1; i >= 0; i--) {
+					if (benches[i].improved) break;
+					sinceLastWin++;
+				}
+				const wins = benches.filter((b) => b.improved).length;
+				ctx.ui.notify(
+					`21 project: ${cfg.name}\n` +
+						`Best: ${best ? `${best.score}${cfg.score.unit ? " " + cfg.score.unit : ""} @ ${best.gitHead}` : "none yet"}\n` +
+						`Measurements: ${benches.length} (${wins} improved) · since last win: ${sinceLastWin}`,
+					"info",
+				);
+			} catch {
+				ctx.ui.notify("Could not read .21 state.", "error");
+			}
+		},
+	});
+
 	// ---- Supervisor: plateau detection and redirection ----
 	pi.on("agent_end", async (_event, ctx) => {
 		const cfgPath = join(ctx.cwd, CONFIG_PATH());
