@@ -1,5 +1,5 @@
 ---
-name: 21
+name: "21"
 description: "Autonomous evolutionary optimization loop (21 harness). Use when the user asks to run an optimization experiment, improve a benchmark score autonomously, evolve candidates against a scoring function, or mentions 21 / bench21 / evolutionary search / experiment loop. Requires .21/config.json in the project (create with init21)."
 ---
 
