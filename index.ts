@@ -84,7 +84,9 @@ async function readBest(cwd: string): Promise<BestState | null> {
 function makeGit(execFn: typeof pi.exec) {
 	return async (cwd: string, args: string[], signal?: AbortSignal): Promise<string> => {
 		const r = await execFn("git", ["-C", cwd, ...args], { signal, timeout: 30_000 });
-		return r.code === 0 ? r.stdout.trim() : "";
+		// trimEnd only: a leading trim would eat the status column of the
+		// first porcelain line (" M file" -> "M file") and corrupt paths.
+		return r.code === 0 ? r.stdout.replace(/[\s\n]+$/, "") : "";
 	};
 }
 
@@ -398,8 +400,6 @@ export default function harness21(pi: ExtensionAPI) {
 						})
 						.filter((p) => p && !isHarnessPath(p));
 					if (changed.length > 0) {
-						console.error("[DEBUG revert] changed=", JSON.stringify(changed));
-						console.error("[DEBUG revert] RAW dirty=", JSON.stringify(dirty));
 						const out = await git(ctx.cwd, ["checkout", "--", ...changed]);
 						const after = await git(ctx.cwd, ["status", "--porcelain"]);
 						const remainingTracked = after.split("\n").filter((l) => l.trim() && !l.trim().startsWith("??")).length;
