@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# run21 — run the 21 evolutionary search headlessly for long horizons.
+#
+# Usage:
+#   run21 --task "improve the benchmark score" [--iterations 50] [--max-minutes 480] [--sleep 10] [--parallel K]
+#
+# Design:
+#   - Each iteration is a FRESH `pi -p` session (crash = zero lost state).
+#   - All state lives under .21/ (lineage, best, config) — file-based.
+#   - Improvements become git commits (checkpoints).
+#   - Regressions are auto-reverted by bench21.
+#   - Lockfile prevents double runs on the same project.
+#   - --parallel K: K git worktrees explore distinct strategy axes concurrently;
+#     the best worker is merged into the main branch at the end.
+set -uo pipefail
+
+TASK=""
+ITERATIONS=0          # 0 = unlimited
+MAX_MINUTES=0         # 0 = no time limit
+SLEEP_SEC=5
+STALL_LIMIT=8         # stop after N iterations with no improvement
+PARALLEL=1            # >1: parallel population mode across K worktrees
+REFLECT_EVERY=10      # encourage reflect21 every N iterations
+AXES=("algorithmic" "data-layout" "micro-tuning" "concurrency" "io-batching" "memory-footprint")
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task) TASK="$2"; shift 2;;
+    --iterations) ITERATIONS="$2"; shift 2;;
+    --max-minutes) MAX_MINUTES="$2"; shift 2;;
+    --sleep) SLEEP_SEC="$2"; shift 2;;
+    --parallel) PARALLEL="$2"; shift 2;;
+    *) echo "unknown argument: $1"; exit 1;;
+  esac
+done
+
+CWD="$(pwd)"
+D="$CWD/.21"
+LOG="$D/run.log"
+LOCK="$D/run.lock"
+
+[[ -f "$D/config.json" ]] || { echo "ERROR: .21/config.json missing. Run init21 inside pi first."; exit 1; }
+[[ -n "$TASK" ]] || { echo "ERROR: --task is required."; exit 1; }
+
+# lockfile
+if [[ -e "$LOCK" ]] && kill -0 "$(cat "$LOCK")" 2>/dev/null; then
+  echo "ERROR: a run is already active in this project (PID $(cat "$LOCK"))."; exit 1
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
+mkdir -p "$D"
+START=$(date +%s)
+
+log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
+
+best_of() { python3 -c "import json;print(json.load(open('$1/best.json'))['score'])" 2>/dev/null || echo ""; }
+
+# ---------- Parallel population mode ----------
+if [[ $PARALLEL -gt 1 ]]; then
+  log "═══ PARALLEL MODE ═══ K=$PARALLEL task='$TASK' iterations=$ITERATIONS"
+  WROOT="$D/workers"
+  mkdir -p "$WROOT"
+  pids=()
+  for i in $(seq 0 $((PARALLEL-1))); do
+    wt="$WROOT/w$i"
+    git worktree remove --force "$wt" >/dev/null 2>&1
+    git branch -D "21/w$i" >/dev/null 2>&1
+    if ! git worktree add -b "21/w$i" "$wt" HEAD >>"$LOG" 2>&1; then
+      log "WARNING: could not create worktree w$i, skipping"; continue
+    fi
+    mkdir -p "$wt/.21"
+    cp "$D/config.json" "$wt/.21/"
+    axis="${AXES[$((i % ${#AXES[@]}))]}"
+    (
+      cd "$wt" || exit 1
+      WLOG="$D/worker-$i.log"
+      it=0
+      while : ; do
+        it=$((it+1))
+        [[ $ITERATIONS -gt 0 && $it -gt $ITERATIONS ]] && break
+        [[ $MAX_MINUTES -gt 0 ]] && { el=$(( ($(date +%s)-START)/60 )); [[ $el -ge $MAX_MINUTES ]] && break; }
+        reflect=""
+        [[ $((it % REFLECT_EVERY)) -eq 0 ]] && reflect="Also call reflect21 in this iteration and write evidence-backed lessons so far."
+        P="21 WORKER-$i (axis: $axis) iteration #$it. Task: $TASK
+Apply exactly this one loop:
+1. Read your own history with lineage21 view=strategies
+2. Log a hypothesis with hypothesis21 — the strategy tag must come from the '${axis}' axis (assigned to this worker)
+3. Make ONE focused code change
+4. Measure with bench21
+5. If IMPROVED: git add -A && git commit -m \"21(w$i#$it/$axis): <summary>\"
+6. Write a single-line summary. $reflect"
+        echo "[w$i it$it] starting" >> "$WLOG"
+        timeout "${PI_TIMEOUT:-3600}" pi -p "$P" >> "$WLOG" 2>&1 \
+          || echo "[w$i it$it] pi error/timeout — continuing" >> "$WLOG"
+        sleep "$SLEEP_SEC"
+      done
+      echo "[w$i] done" >> "$WLOG"
+    ) &
+    pids+=("$!")
+  done
+  wait "${pids[@]}"
+
+  # ---- Selection: merge the best worker into the main branch ----
+  master_best=$(best_of "$D")
+  win_score=""; win_i=""
+  for i in $(seq 0 $((PARALLEL-1))); do
+    wt="$WROOT/w$i"
+    [[ -d "$wt" ]] || continue
+    s=$(best_of "$wt")
+    [[ -z "$s" ]] && continue
+    log "worker-$i result: $s"
+    if [[ -z "$win_score" ]] || python3 -c "import sys; sys.exit(0 if float('$s') > float('$win_score') else 1)"; then
+      win_score="$s"; win_i=$i
+    fi
+  done
+  if [[ -n "$win_i" ]]; then
+    better=$(python3 -c "print(1 if not '$master_best' or float('$win_score') > float('$master_best') else 0)")
+    if [[ $better == 1 ]]; then
+      if git merge --no-ff "21/w$win_i" -m "21-parallel: worker-$win_i selected (score $win_score)" >>"$LOG" 2>&1; then
+        log "MERGE: worker-$win_i merged into main (score $win_score > ${master_best:-none})"
+      else
+        log "WARNING: merge conflict — manual review needed (branch: 21/w$win_i)"
+      fi
+    else
+      log "No worker beat the master best ($win_score <= $master_best). Merge skipped."
+    fi
+  fi
+  for i in $(seq 0 $((PARALLEL-1))); do git worktree remove --force "$WROOT/w$i" >/dev/null 2>&1; done
+  log "═══ parallel run finished ═══ best: ${win_score:-unchanged}"
+  exit 0
+fi
+
+# ---------- Sequential mode ----------
+log "═══ run21 started ═══ task='$TASK' iterations=$ITERATIONS max_minutes=$MAX_MINUTES"
+
+iter=0
+stall=0
+prev_best=""
+
+while : ; do
+  iter=$((iter+1))
+
+  # budget checks
+  if [[ $MAX_MINUTES -gt 0 ]]; then
+    elapsed=$(( ($(date +%s) - START) / 60 ))
+    if [[ $elapsed -ge $MAX_MINUTES ]]; then log "Time budget exhausted (${elapsed} min). Stopping."; break; fi
+  fi
+  if [[ $ITERATIONS -gt 0 && $iter -gt $ITERATIONS ]]; then log "Iteration budget exhausted ($ITERATIONS). Stopping."; break; fi
+
+  # stall detection (best.json unchanged?)
+  cur_best=$(best_of "$D")
+  if [[ -n "$cur_best" && "$cur_best" == "$prev_best" ]]; then
+    stall=$((stall+1))
+  else
+    stall=0
+    prev_best="$cur_best"
+  fi
+  if [[ $stall -ge $STALL_LIMIT ]]; then
+    log "STALL: best score unchanged for $STALL_LIMIT iterations ($cur_best). Stopping run."
+    break
+  fi
+
+  log "─── iteration $iter starting (best: ${cur_best:-none}, stall: $stall/$STALL_LIMIT) ───"
+
+  PROMPT="21 iteration #$iter. Task: $TASK
+Apply exactly this one loop and do not go anywhere else:
+1. Read history with lineage21 view=strategies (never retry failed tags)
+2. Log a NEW hypothesis with hypothesis21 (a distinct strategy tag)
+3. Make ONE focused code change
+4. Measure with bench21
+5. If the result is IMPROVED: git add -A && git commit -m \"21(#$iter): <hypothesis summary>\"
+6. Write a one-line summary: iteration #, tag, score, decision."
+
+  reflect=""
+  [[ $((iter % REFLECT_EVERY)) -eq 0 ]] && PROMPT="$PROMPT
+7. Also call reflect21 in this iteration and write evidence-backed lessons so far."
+  if [[ $stall -ge 3 ]]; then
+    PROMPT="$PROMPT
+IMPORTANT: no progress for $stall iterations. At the start of this iteration consult the pi-subagents ORACLE:
+   'Strategies are exhausted (data is in lineage). Suggest a different abstraction level.'
+Log the suggestion as a new hypothesis and execute it."
+  fi
+
+  if timeout "${PI_TIMEOUT:-3600}" pi -p "$PROMPT" >> "$LOG" 2>&1; then
+    log "iteration $iter completed"
+  else
+    rc=$?
+    log "WARNING: iteration $iter pi exit code=$rc (timeout/crash) — state is safe in files, continuing"
+  fi
+
+  sleep "$SLEEP_SEC"
+done
+
+final=$(best_of "$D")
+log "═══ run21 finished ═══ iterations=$iter final_best=$final"
