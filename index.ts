@@ -748,11 +748,48 @@ export default function harness21(pi: ExtensionAPI) {
 		});
 	};
 
+	// Known autoresearch challenges: goal keywords -> repo hints for the agent
+	const KNOWN_CHALLENGES: Array<{ keys: RegExp; name: string; repo?: string }> = [
+		{ keys: /lighter/i, name: "Lighter.fast (yukon.org)", repo: "https://github.com/Layr-Labs/lighter-prover-challenge" },
+		{ keys: /ecdsa|quantum|elliptic/i, name: "ECDSA.fail (yukon.org)" },
+		{ keys: /mlx|apple silicon/i, name: "MLX.fast (yukon.org)" },
+		{ keys: /snark|flock|succinct/i, name: "SNARK.fast (yukon.org)" },
+		{ keys: /proximity|soundness|proof system/i, name: "The Proximity Prize (yukon.org)" },
+	];
+
 	// Guided setup / edit. Empty answers fall back to sensible defaults;
 	// if the scoring command cannot be determined, the rest of setup is
 	// delegated to the agent itself.
 	const runWizard = async (ctx: any, prev?: Config) => {
 		ctx.ui.notify(prev ? "21 setup — press Enter to keep current values." : "21 setup — a few questions to wire this project.", "info");
+
+		// Goal-first onboarding: what do you want to optimize / join?
+		if (!prev) {
+			const goal = await ctx.ui.input(
+				"What do you want to optimize? (challenge or task name — press Enter to configure manually)",
+				"",
+			);
+			if (goal && goal.trim()) {
+				const g = goal.trim();
+				const known = KNOWN_CHALLENGES.find((k) => k.keys.test(g));
+				pi.sendUserMessage(
+					`21 GOAL SET BY USER: "${g}"` +
+						(known ? `\nRecognized challenge: ${known.name}` + (known.repo ? `\nOfficial repo: ${known.repo}` : "") : "") +
+						`\nYour mission — complete end-to-end setup autonomously:\n` +
+						`1. Locate the official repository (gh search / web) unless a repo is given above; clone it into a subdirectory of ${ctx.cwd}.\n` +
+						`2. Install dependencies and get the build/benchmark working.\n` +
+						`3. Identify or create the score-producing command; run it once and determine a reliable score regex.\n` +
+						`4. Call init21 inside the cloned project directory (cd there first) with those parameters.\n` +
+						`5. Verify bench21 produces a valid first measurement.\n` +
+						`6. Report: repo, setup steps taken, baseline score, and how to start optimizing.`,
+				);
+				ctx.ui.notify(
+					`Goal noted: "${g}". Handing over to the agent — it will find the repo, set everything up and report back.`,
+					"info",
+				);
+				return;
+			}
+		}
 
 		const defaultName = prev?.name ?? path.basename(ctx.cwd);
 		const name = (await ctx.ui.input("Project name:", defaultName)) || defaultName;
