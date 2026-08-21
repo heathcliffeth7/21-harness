@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.0
+- Proactive capture: the agent is now instructed to call reflect21 the moment it discovers a durable insight, not just at review checkpoints.
+- Compact guard: manual /compact in a 21 project pauses once so lessons are captured before conversational detail is discarded (threshold/overflow compactions are never blocked).
+
 ## v0.9.0
 - Auto-reflection (prime-agent AutoRefine pattern): after substantial manual work in a 21 project, the agent is automatically asked to review its trajectory and capture durable lessons via reflect21 — once per session, configurable via `supervisor.autoReflect: false`. reflect21's evidence/retention guards keep quality high.
 

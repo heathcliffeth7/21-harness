@@ -50,6 +50,12 @@ and a new lesson that contradicts an active one retires the old — nothing is
 silently deleted. When starting new runs, ACTIVE lessons are shown to you
 automatically — follow them.
 
+## Proactive capture
+
+The moment you discover something DURABLE mid-work — a root cause, a pitfall,
+a technique that works and why — call `reflect21` IMMEDIATELY. Do not batch
+insights for later; compaction and context loss do not wait.
+
 ## Critical rules
 
 - Always call `hypothesis21` before `bench21`.

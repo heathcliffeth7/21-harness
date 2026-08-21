@@ -47,6 +47,8 @@ interface BestState {
 
 const VERSION = "0.8.0";
 const CHANGELOG_SUMMARY: Record<string, string> = {
+	"1.0.0": "+ proactive capture & compact guard: durable insights are saved the moment they are learned; manual /compact pauses once for reflection first.",
+	"0.9.0": "+ auto-reflection: after substantial manual work the agent reviews its trajectory and saves durable lessons automatically.",
 	"0.8.0": "+ update notifications (this card).",
 	"0.7.0": "+ score21: record OFFICIAL scores from competition submissions/validation queues when local measurement is not possible.",
 	"0.6.0": "/21 now asks WHAT you want to optimize first — the agent finds the repo, sets it up and completes configuration autonomously.",
@@ -204,7 +206,7 @@ export default function harness21(pi: ExtensionAPI) {
 			(best
 				? `Best score: ${best.score}${cfg.score.unit ? " " + cfg.score.unit : ""} @ ${best.gitHead}. ${sinceLastWin} measurements since last improvement.`
 				: "No measurements yet.") +
-			`\nWhen optimizing in this project, follow the loop: log a hypothesis (hypothesis21), make ONE focused change, measure with bench21.` +
+			`\nWhen optimizing in this project, follow the loop: log a hypothesis (hypothesis21), make ONE focused change, measure with bench21. When you discover a DURABLE insight mid-work (root cause, pitfall, what works and why), call reflect21 IMMEDIATELY - do not wait for session end.` +
 			knowledge;
 
 		return {
@@ -1065,6 +1067,34 @@ export default function harness21(pi: ExtensionAPI) {
 				'- If NO (routine work, nothing generalizable): reply exactly "nothing durable" and do nothing else.\n' +
 				"Do not invent lessons; reflect21 will reject unsupported claims anyway.",
 		);
+	});
+
+	// ---- Compact guard (prime-agent compact trigger) ----
+	// Manual /compact discards conversation detail. If substantial unreflected
+	// work exists, pause once so lessons are captured to knowledge.md first.
+	// Automatic compactions (threshold/overflow) are never blocked.
+	let compactNudgeUsed = false;
+	pi.on("session_before_compact", async (event, ctx) => {
+		const cfgPath = join(ctx.cwd, CONFIG_PATH());
+		if (!existsSync(cfgPath)) return undefined;
+		if (event.reason !== "manual") return undefined;
+		let cfg: Config | undefined;
+		try { cfg = JSON.parse(await readFile(cfgPath, "utf-8")); } catch {}
+		if (!cfg || cfg.supervisor?.autoReflect === false) return undefined;
+		if (compactNudgeUsed || sessionMsgCount < 8 || reviewedThisSession) return undefined;
+		if (!ctx.hasUI) return undefined;
+		compactNudgeUsed = true;
+		ctx.ui.notify(
+			"Compaction paused once: capture durable lessons first (reflect21), then /compact again.",
+			"warning",
+		);
+		pi.sendUserMessage(
+			"[21 PRE-COMPACT REVIEW] You are about to compact this session, which will discard conversational detail. " +
+				"Before that happens: review THIS session for durable, evidence-backed lessons (bottleneck causes, pitfalls, " +
+				"what worked) and capture them with reflect21 now. If there is truly nothing generalizable, reply exactly " +
+				'\"nothing durable\" and I will proceed with compaction.',
+		);
+		return { cancel: true };
 	});
 
 	// ---- Passive capture: log manual eval runs done via plain bash ----
