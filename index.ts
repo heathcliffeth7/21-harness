@@ -20,6 +20,7 @@ import { Type } from "typebox";
 import { readFile, writeFile, appendFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import os from "node:os";
 
 // ---------- Types ----------
 
@@ -123,6 +124,24 @@ export default function harness21(pi: ExtensionAPI) {
 			);
 		} catch {
 			/* broken config -> silently continue */
+		}
+
+		// best-effort update check (non-blocking failure, 6s cap)
+		try {
+			const pkgDir = "/root/.pi/agent/git/github.com/heathcliffeth7/21-harness".replace("/root", os.homedir());
+			if (existsSync(join(pkgDir, ".git"))) {
+				await pi.exec("git", ["-C", pkgDir, "fetch", "origin", "--quiet"], { timeout: 6000 });
+				const r = await pi.exec("git", ["-C", pkgDir, "rev-list", "--count", "HEAD..origin/master"], { timeout: 5000 });
+				const behind = parseInt((r.stdout || "0").trim(), 10);
+				if (r.code === 0 && behind > 0) {
+					ctx.ui.notify(
+						`21-harness: ${behind} update(s) available. Run 'pi update --extensions' or 'update21'.`,
+						"warning",
+					);
+				}
+			}
+		} catch {
+			/* offline or not a git install -> skip */
 		}
 	});
 

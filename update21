@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 21-update — pull the latest 21-harness from GitHub via pi's package manager.
+set -e
+echo "Updating 21-harness..."
+pi update --extension git:github.com/heathcliffeth7/21-harness
+echo
+echo "Installed version:"
+grep '"version"' "$(dirname "$(readlink -f "$0")")/../git/github.com/heathcliffeth7/21-harness/package.json" 2>/dev/null \
+  || grep -h '"version"' ~/.pi/agent/git/github.com/heathcliffeth7/21-harness/package.json 2>/dev/null \
+  || echo "(version unknown)"
+echo "Done. Restart any open pi sessions to load the new version."
