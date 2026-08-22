@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.0
+- Vector scoring, matching the paper's formulation f = (f_1..f_n): configure multiple named components with their own regexes and optional weights (`weighted-sum` or `min` aggregate). Any component that fails to parse makes the attempt a loss and triggers auto-revert — partial candidates can no longer become best.
+
 ## v1.0.1
 - scripts/patch-prime-agent-refine.sh: fixes prime-agent `/refine` failures ("Bad control character in string literal") caused by raw control characters in model JSON output. Run once after installing/updating prime-agent.
 

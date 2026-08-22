@@ -28,7 +28,13 @@ import os from "node:os";
 interface Config {
 	name: string;
 	eval: { command: string; args?: string[]; cwd?: string; timeoutSec?: number };
-	score: { regex: string; mode: "max" | "min"; unit?: string };
+	score: {
+		regex: string;
+		mode: "max" | "min";
+		unit?: string;
+		components?: Array<{ name: string; regex: string; weight?: number }>;
+		aggregate?: "weighted-sum" | "min";
+	};
 	gate?: { autoRevert?: boolean; requireHypothesis?: boolean };
 	supervisor?: {
 		enabled?: boolean;
@@ -43,10 +49,12 @@ interface BestState {
 	gitHead: string;
 	ts: string;
 	hypothesis?: string;
+	scores?: Record<string, number>;
 }
 
-const VERSION = "1.0.2";
+const VERSION = "1.1.0";
 const CHANGELOG_SUMMARY: Record<string, string> = {
+	"1.1.0": "+ vector scoring (paper's f = (f_1..f_n)): multiple test configurations per eval, weighted-sum or min aggregate, any unparseable component counts as a loss.",
 	"1.0.2": "+ version reporting fixed (update card shows the true version).",
 	"1.0.1": "+ patch script for prime-agent /refine JSON crashes.",
 	"1.0.0": "+ proactive capture & compact guard: durable insights are saved the moment they are learned; manual /compact pauses once for reflection first.",
@@ -232,10 +240,21 @@ export default function harness21(pi: ExtensionAPI) {
 			evalCommand: Type.String({
 				description: "Command that produces a score, e.g. ./benchmark.sh or cargo run --release --bin bench",
 			}),
-			scoreRegex: Type.String({
+			scoreRegex: Type.Optional(Type.String({
 				description:
-					"Regex capturing the score from command output (single capture group), e.g. 'throughput[=: ]+([0-9.]+)'",
-			}),
+					"Regex capturing the score from command output (single capture group), e.g. 'throughput[=: ]+([0-9.]+)'. " +
+					"Omit when components is provided.",
+			})),
+			components: Type.Optional(Type.Array(Type.Object({
+				name: Type.String({ description: "Test configuration name, e.g. seq-4096" }),
+				regex: Type.String({ description: "Regex for this configuration's score (single capture group)" }),
+				weight: Type.Optional(Type.Number({ description: "Weight in weighted-sum aggregate (default 1)" })),
+			}), {
+				description: "Optional multi-configuration scoring (paper's vector f). Every component must be parseable or the attempt counts as a loss.",
+			})),
+			aggregate: Type.Optional(Type.Union([Type.Literal("weighted-sum"), Type.Literal("min")], {
+				description: "How to combine component scores into one comparable number (default weighted-sum)",
+			})),
 			mode: Type.Union([Type.Literal("max"), Type.Literal("min")], {
 				description: "max: higher score is better, min: lower score is better (e.g. latency)",
 			}),
@@ -246,10 +265,19 @@ export default function harness21(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const dir = join(ctx.cwd, ".21");
 			await mkdir(dir, { recursive: true });
+			if (!params.scoreRegex && !(params.components && params.components.length > 0)) {
+				return { content: [{ type: "text", text: "Either scoreRegex or at least one component is required." }], details: {} };
+			}
 			const cfg: Config = {
 				name: params.name,
 				eval: { command: params.evalCommand, timeoutSec: params.timeoutSec ?? 3600 },
-				score: { regex: params.scoreRegex, mode: params.mode, unit: params.unit },
+				score: {
+					regex: params.scoreRegex ?? "",
+					mode: params.mode,
+					unit: params.unit,
+					components: params.components && params.components.length > 0 ? params.components : undefined,
+					aggregate: params.aggregate,
+				},
 				gate: { autoRevert: params.autoRevert ?? true, requireHypothesis: true },
 				supervisor: { enabled: true, plateauWindow: 5, minImprovementPct: 0.1, autoReflect: true },
 			};
@@ -340,12 +368,71 @@ export default function harness21(pi: ExtensionAPI) {
 			const gitHead = await git(ctx.cwd, ["rev-parse", "--short", "HEAD"]).catch(() => "");
 			const dirty = await git(ctx.cwd, ["status", "--porcelain"]).catch(() => "");
 
-			const re = new RegExp(cfg.score.regex, "gi");
+			// parse scores: single-regex mode or vector mode (paper's f = (f_1..f_n))
 			let score: number | null = null;
-			let m: RegExpExecArray | null;
-			while ((m = re.exec(r.stdout ?? "")) !== null) score = parseFloat(m[1].replace(/,/g, ""));
+			let scoresMap: Record<string, number | null> | undefined;
+			let missingComponents: string[] | undefined;
+			const comps = cfg.score.components ?? [];
+			if (comps.length > 0) {
+				scoresMap = {};
+				const weighted: Array<[number, number]> = [];
+				for (const comp of comps) {
+					const mm = new RegExp(comp.regex, "i").exec(r.stdout ?? "");
+					let val: number | null = mm ? parseFloat(mm[1].replace(/,/g, "")) : null;
+					if (val !== null && Number.isNaN(val)) val = null;
+					scoresMap[comp.name] = val;
+					if (val === null) (missingComponents ??= []).push(comp.name);
+					else weighted.push([val, comp.weight ?? 1]);
+				}
+				if (!missingComponents) {
+					score = cfg.score.aggregate === "min"
+						? Math.min(...weighted.map((w) => w[0]))
+						: weighted.reduce((s, [v, w]) => s + v * w, 0);
+				}
+			} else {
+				const re = new RegExp(cfg.score.regex, "gi");
+				let m: RegExpExecArray | null;
+				while ((m = re.exec(r.stdout ?? "")) !== null) score = parseFloat(m[1].replace(/,/g, ""));
+			}
 
 			const bestBefore = await readBest(ctx.cwd);
+
+			// Vector mode: any missing component = losing attempt (paper: zero score)
+			if (missingComponents && missingComponents.length > 0) {
+				const entry = {
+					ts: new Date().toISOString(),
+					type: "bench",
+					score: null,
+					scores: scoresMap,
+					aggregate: null,
+					bestBefore: bestBefore?.score ?? null,
+					improved: false,
+					deltaPct: null,
+					unit: cfg.score.unit ?? null,
+					gitHead,
+					dirtyFiles: dirty ? dirty.split("\n").length : 0,
+					notes: params.notes ?? null,
+				};
+				await appendFile(join(ctx.cwd, LOG_PATH()), JSON.stringify(entry) + "\n");
+				lastBenchHadHypothesis = false;
+				let revertNote2 = "";
+				if (cfg.gate?.autoRevert !== false && dirty) {
+					// slice on RAW porcelain line first — trimming before slicing eats the status column
+					const changed = dirty.split("\n").filter((l) => l.trim() && !l.trim().startsWith("??")).map((l) => { const p = l.slice(3).trim(); return p.includes(" -> ") ? p.split(" -> ").pop()!.trim() : p; }).filter((p) => p && !isHarnessPath(p));
+					if (changed.length > 0) {
+						await git(ctx.cwd, ["checkout", "--", ...changed]);
+						revertNote2 = ` Reverted ${changed.length} file(s).`;
+					}
+				}
+				return {
+					content: [{ type: "text", text:
+						`❌ VECTOR INCOMPLETE: no parseable value for ${missingComponents.join(", ")}. ` +
+						`Per the scoring contract this attempt counts as a loss (zero contribution).${revertNote2}\n` +
+						`Component values seen: ${JSON.stringify(scoresMap)}`
+					}],
+					details: { failed: false, incomplete: true },
+				};
+			}
 
 			// Eval or score parse failed
 			if (r.code !== 0 || score === null || Number.isNaN(score)) {
@@ -406,6 +493,7 @@ export default function harness21(pi: ExtensionAPI) {
 				ts: new Date().toISOString(),
 				type: "bench",
 				score,
+				scores: scoresMap,
 				bestBefore: bestBefore?.score ?? null,
 				improved,
 				deltaPct: deltaPct === null ? null : +deltaPct.toFixed(4),
@@ -421,6 +509,7 @@ export default function harness21(pi: ExtensionAPI) {
 			if (improved) {
 				const best: BestState = {
 					score,
+					scores: scoresMap ? Object.fromEntries(Object.entries(scoresMap).filter((e): e is [string, number] => e[1] !== null)) : undefined,
 					gitHead: finalHead,
 					ts: entry.ts,
 					hypothesis: params.notes ?? null,

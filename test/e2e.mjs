@@ -111,4 +111,23 @@ const kRaw = fs.readFileSync(path.join(WORK, ".21/knowledge.md"), "utf8");
 if (!kRaw.includes("[retired:superseded-by-L#2]")) fail("old lesson not marked retired in file");
 if (!kRaw.match(/L#2 \[active\]/)) fail("new lesson not active in file");
 
-console.log("✅ e2e passed: gates, auto-commit, auto-revert, lineage, guarded reflection all verified.");
+// --- vector scoring (paper's f = (f_1..f_n)) ---
+sh("cat > b.sh <<'EOS'\n#!/bin/bash\na=$(cat opt.txt 2>/dev/null||echo 50)\nb=$((a / 2))\necho \"cfg4096: $a\"\necho \"cfg8192: $b\"\nEOS");
+await tools.init21.execute("t", {
+  name: "vec", evalCommand: "./b.sh", mode: "max",
+  components: [
+    { name: "cfg4096", regex: "cfg4096: ([0-9.]+)" },
+    { name: "cfg8192", regex: "cfg8192: ([0-9.]+)", weight: 2 },
+  ],
+  aggregate: "weighted-sum",
+}, undefined, undefined, ctx);
+await hyp("vec-base");
+v = await bench();
+if (!v.includes("IMPROVED")) fail(`vector base should IMPROVE, got: ${v}`);
+// bir bileşen parse edilemez olursa kayıp + revert
+sh("cat > b.sh <<'EOS'\n#!/bin/bash\necho \"cfg4096: 99\"\necho \"broken line\"\nEOS");
+await hyp("vec-broken");
+v = await bench();
+if (!v.includes("VECTOR INCOMPLETE")) fail(`missing component should count as loss, got: ${v}`);
+
+console.log("✅ e2e passed: gates, auto-commit, auto-revert, lineage, guarded reflection, vector scoring verified.");
