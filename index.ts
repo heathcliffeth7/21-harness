@@ -45,8 +45,9 @@ interface BestState {
 	hypothesis?: string;
 }
 
-const VERSION = "0.8.0";
+const VERSION = "1.0.2";
 const CHANGELOG_SUMMARY: Record<string, string> = {
+	"1.0.2": "+ version reporting fixed (update card shows the true version).",
 	"1.0.1": "+ patch script for prime-agent /refine JSON crashes.",
 	"1.0.0": "+ proactive capture & compact guard: durable insights are saved the moment they are learned; manual /compact pauses once for reflection first.",
 	"0.9.0": "+ auto-reflection: after substantial manual work the agent reviews its trajectory and saves durable lessons automatically.",
