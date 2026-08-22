@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.1
+- scripts/patch-prime-agent-refine.sh: fixes prime-agent `/refine` failures ("Bad control character in string literal") caused by raw control characters in model JSON output. Run once after installing/updating prime-agent.
+
 ## v1.0.0
 - Proactive capture: the agent is now instructed to call reflect21 the moment it discovers a durable insight, not just at review checkpoints.
 - Compact guard: manual /compact in a 21 project pauses once so lessons are captured before conversational detail is discarded (threshold/overflow compactions are never blocked).
